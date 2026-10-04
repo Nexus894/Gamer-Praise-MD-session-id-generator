@@ -3,7 +3,8 @@
 // Standalone Session Generator for Gamer-Praise-MD
 // Shares utils/session.js with the bot → 100% format compatible.
 // ─────────────────────────────────────────────────────────
-
+// ✅ Correct for standalone generator
+const { encodeSessionId, createFreshAuthState } = require("./utils/session");
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");

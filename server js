@@ -1,10 +1,9 @@
 // session-generator/server.js
 // ─────────────────────────────────────────────────────────
 // Standalone Session Generator for Gamer-Praise-MD
-// Shares utils/session.js with the bot → 100% format compatible.
+// Fixed: pairing code now waits for the socket to be ready.
 // ─────────────────────────────────────────────────────────
-// ✅ Correct for standalone generator
-const { encodeSessionId, createFreshAuthState } = require("./utils/session");
+
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
@@ -13,14 +12,14 @@ const pino = require("pino");
 const makeWASocket = require("@whiskeysockets/baileys").default;
 const {
     DisconnectReason,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    Browsers
 } = require("@whiskeysockets/baileys");
 
-// ⚠️ Import the SAME session utility the bot uses.
 const {
     encodeSessionId,
     createFreshAuthState
-} = require("../utils/session");
+} = require("./utils/session");
 
 const app = express();
 app.use(express.json());
@@ -36,7 +35,7 @@ app.post("/api/generate", (req, res) => {
         return res.status(400).json({ error: "phoneNumber is required." });
     }
 
-    const clean = phoneNumber.replace(/[^0-9]/g, "");
+    const clean = phoneNumber.replace(/\D/g, ""); // digits only
     if (clean.length < 8 || clean.length > 15) {
         return res.status(400).json({ error: "Invalid phone number." });
     }
@@ -72,31 +71,48 @@ async function runGeneration(jobId, job, phoneNumber) {
     const { state, rawKeys, creds } = fresh;
 
     const { version } = await fetchLatestBaileysVersion();
+
     const sock = makeWASocket({
         version,
         logger: pino({ level: "silent" }),
         printQRInTerminal: false,
         auth: state,
-        browser: ["Gamer-Praise-MD", "Chrome", "1.0.0"]
+        // ✅ IMPORTANT: use a well-known browser signature so WhatsApp accepts pairing
+        browser: Browsers.macOS("Safari"),
+        markOnlineOnConnect: false,
+        syncFullHistory: false,
+        generateHighQualityLinkPreview: false
     });
 
     sock.ev.on("creds.update", () => {});
 
-    // Baileys needs a moment before pairing can be requested
-    setTimeout(async () => {
-        try {
-            const code = await sock.requestPairingCode(phoneNumber);
-            job.pairingCode = code;
-            job.status = "awaiting_pairing";
-            console.log(`[${jobId}] Pairing code for ${phoneNumber}: ${code}`);
-        } catch (e) {
-            job.status = "error";
-            job.error = "Failed to request pairing code: " + e.message;
-        }
-    }, 3000);
+    let pairingRequested = false;
 
     sock.ev.on("connection.update", async (u) => {
-        const { connection, lastDisconnect } = u;
+        const { connection, lastDisconnect, qr } = u;
+
+        // ✅ Request pairing code ONLY when the socket is connecting and not yet registered
+        if (
+            !pairingRequested &&
+            !sock.authState.creds.registered &&
+            (connection === "connecting" || qr)
+        ) {
+            pairingRequested = true;
+
+            // small delay so Baileys has fully finished the handshake
+            setTimeout(async () => {
+                try {
+                    const code = await sock.requestPairingCode(phoneNumber);
+                    job.pairingCode = code;
+                    job.status = "awaiting_pairing";
+                    console.log(`[${jobId}] Pairing code for ${phoneNumber}: ${code}`);
+                } catch (e) {
+                    job.status = "error";
+                    job.error = "Failed to request pairing code: " + e.message;
+                    console.error(`[${jobId}] Pairing error:`, e);
+                }
+            }, 1500);
+        }
 
         if (connection === "open") {
             try {
@@ -113,7 +129,20 @@ async function runGeneration(jobId, job, phoneNumber) {
 
         if (connection === "close") {
             const code = lastDisconnect?.error?.output?.statusCode;
-            if (job.status !== "ready" && code !== DisconnectReason.loggedOut) {
+
+            // don't error out if we already succeeded
+            if (job.status === "ready") return;
+
+            if (code === DisconnectReason.loggedOut) {
+                job.status = "error";
+                job.error = "Logged out. Generate a new session.";
+            } else if (code === 401) {
+                job.status = "error";
+                job.error = "Unauthorized (401). Try a different browser signature or wait 5 mins.";
+            } else if (code === 405) {
+                job.status = "error";
+                job.error = "Too many pairing attempts. Wait a few minutes and try again.";
+            } else if (job.status !== "awaiting_pairing") {
                 job.status = "error";
                 job.error = `Connection closed (code ${code}). Try again.`;
             }

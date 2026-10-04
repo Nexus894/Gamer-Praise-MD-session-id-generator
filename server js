@@ -1,0 +1,125 @@
+// session-generator/server.js
+// ─────────────────────────────────────────────────────────
+// Standalone Session Generator for Gamer-Praise-MD
+// Shares utils/session.js with the bot → 100% format compatible.
+// ─────────────────────────────────────────────────────────
+
+const express = require("express");
+const path = require("path");
+const crypto = require("crypto");
+const pino = require("pino");
+
+const makeWASocket = require("@whiskeysockets/baileys").default;
+const {
+    DisconnectReason,
+    fetchLatestBaileysVersion
+} = require("@whiskeysockets/baileys");
+
+// ⚠️ Import the SAME session utility the bot uses.
+const {
+    encodeSessionId,
+    createFreshAuthState
+} = require("../utils/session");
+
+const app = express();
+app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
+
+const PORT = process.env.PORT || 3000;
+const jobs = new Map(); // jobId → { status, pairingCode, sessionId, number, error }
+
+/* ─────────────────── POST /api/generate ─────────────────── */
+app.post("/api/generate", (req, res) => {
+    const { phoneNumber } = req.body || {};
+    if (!phoneNumber || typeof phoneNumber !== "string") {
+        return res.status(400).json({ error: "phoneNumber is required." });
+    }
+
+    const clean = phoneNumber.replace(/[^0-9]/g, "");
+    if (clean.length < 8 || clean.length > 15) {
+        return res.status(400).json({ error: "Invalid phone number." });
+    }
+
+    const jobId = crypto.randomUUID();
+    const job = {
+        status: "starting",
+        pairingCode: null,
+        sessionId: null,
+        number: null,
+        error: null
+    };
+    jobs.set(jobId, job);
+
+    res.json({ jobId });
+
+    runGeneration(jobId, job, clean).catch((e) => {
+        job.status = "error";
+        job.error = e.message;
+    });
+});
+
+/* ─────────────────── GET /api/status/:jobId ─────────────────── */
+app.get("/api/status/:jobId", (req, res) => {
+    const job = jobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Job not found." });
+    res.json(job);
+});
+
+/* ─────────────────── Generation worker ─────────────────── */
+async function runGeneration(jobId, job, phoneNumber) {
+    const fresh = createFreshAuthState();
+    const { state, rawKeys, creds } = fresh;
+
+    const { version } = await fetchLatestBaileysVersion();
+    const sock = makeWASocket({
+        version,
+        logger: pino({ level: "silent" }),
+        printQRInTerminal: false,
+        auth: state,
+        browser: ["Gamer-Praise-MD", "Chrome", "1.0.0"]
+    });
+
+    sock.ev.on("creds.update", () => {});
+
+    // Baileys needs a moment before pairing can be requested
+    setTimeout(async () => {
+        try {
+            const code = await sock.requestPairingCode(phoneNumber);
+            job.pairingCode = code;
+            job.status = "awaiting_pairing";
+            console.log(`[${jobId}] Pairing code for ${phoneNumber}: ${code}`);
+        } catch (e) {
+            job.status = "error";
+            job.error = "Failed to request pairing code: " + e.message;
+        }
+    }, 3000);
+
+    sock.ev.on("connection.update", async (u) => {
+        const { connection, lastDisconnect } = u;
+
+        if (connection === "open") {
+            try {
+                job.number = sock.user.id.split(":")[0].split("@")[0];
+                job.sessionId = encodeSessionId(creds, rawKeys);
+                job.status = "ready";
+                console.log(`[${jobId}] Session ready for ${job.number}`);
+                setTimeout(() => sock.end(undefined), 1500);
+            } catch (e) {
+                job.status = "error";
+                job.error = "Encoding failed: " + e.message;
+            }
+        }
+
+        if (connection === "close") {
+            const code = lastDisconnect?.error?.output?.statusCode;
+            if (job.status !== "ready" && code !== DisconnectReason.loggedOut) {
+                job.status = "error";
+                job.error = `Connection closed (code ${code}). Try again.`;
+            }
+        }
+    });
+}
+
+app.listen(PORT, () => {
+    console.log(`🧩 Gamer-Praise-MD Session Generator → http://localhost:${PORT}`);
+});

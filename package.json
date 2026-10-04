@@ -1,0 +1,24 @@
+{
+  "name": "gamer-praise-md-generator",
+  "version": "1.0.0",
+  "description": "Session ID Generator for Gamer-Praise-MD",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "generator": "node server.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "session",
+    "generator",
+    "baileys",
+    "gamer-praise-md"
+  ],
+  "author": "Gpraise",
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "express": "^4.19.2",
+    "pino": "^9.0.0"
+  }
+}

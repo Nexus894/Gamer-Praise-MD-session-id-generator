@@ -60,6 +60,7 @@
     animation:spin .7s linear infinite; vertical-align:-2px; margin-right:6px;
   }
   @keyframes spin { to { transform:rotate(360deg); } }
+  .debug { font-size:11px; color:#6e7681; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -83,40 +84,82 @@
 const $ = (id) => document.getElementById(id);
 let poll = null;
 
+/* ─── Quick server-health check on page load ─── */
+(async () => {
+  try {
+    const h = await fetch("/api/health").then(r => r.json());
+    console.log("[health]", h);
+  } catch (e) {
+    console.warn("[health] failed:", e.message);
+  }
+})();
+
+/* ─── Generate button ─── */
 $("go").addEventListener("click", async () => {
-  const phone = $("phone").value.trim();
-  if (!phone) return;
+  const phone = $("phone").value.replace(/\D/g, "");
+  if (!phone || phone.length < 8) {
+    $("out").className = "out err";
+    $("out").textContent = "❌ Please enter a valid phone number (digits only, with country code).";
+    $("out").style.display = "block";
+    return;
+  }
 
   $("go").disabled = true;
   $("codeBox").style.display = "none";
   $("hint").style.display = "none";
   $("out").style.display = "none";
+  if (poll) clearInterval(poll);
 
-  const r = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ phoneNumber: phone })
-  }).then(r => r.json()).catch(() => null);
+  $("out").className = "out";
+  $("out").innerHTML = `<span class="spin"></span> Contacting server…`;
+  $("out").style.display = "block";
+
+  // ── REAL error-aware fetch ──
+  let r = null;
+  try {
+    const resp = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phoneNumber: phone })
+    });
+    const raw = await resp.text();
+    try { r = JSON.parse(raw); } catch { r = { error: raw || "(empty)" }; }
+    r._status = resp.status;
+  } catch (e) {
+    r = { error: e.message, _status: "network error" };
+  }
 
   if (!r || !r.jobId) {
     $("out").className = "out err";
-    $("out").textContent = "❌ Failed to start generation.";
+    $("out").innerHTML =
+      `<b>❌ Failed to start generation.</b><br><br>` +
+      `<b>HTTP status:</b> ${r?._status ?? "?"}<br>` +
+      `<b>Error:</b> ${escapeHtml(r?.error || r?.message || "unknown")}<br><br>` +
+      `<div class="debug">Raw response:<br><code>${escapeHtml(JSON.stringify(r).slice(0, 400))}</code></div>`;
     $("out").style.display = "block";
     $("go").disabled = false;
     return;
   }
 
-  $("out").className = "out";
-  $("out").innerHTML = `<span class="spin"></span> Starting session…`;
-  $("out").style.display = "block";
-
+  $("out").innerHTML = `<span class="spin"></span> Starting session… (job ${r.jobId.slice(0,8)})`;
   poll = setInterval(() => checkStatus(r.jobId), 2000);
 });
 
+/* ─── Poll job status ─── */
 async function checkStatus(jobId) {
-  const s = await fetch(`/api/status/${jobId}`)
-    .then(r => r.json())
-    .catch(() => null);
+  let s = null;
+  try {
+    const resp = await fetch(`/api/status/${jobId}`);
+    s = await resp.json();
+  } catch (e) {
+    $("out").className = "out err";
+    $("out").innerHTML =
+      `<b>❌ Lost contact with server.</b><br>` +
+      `<b>Error:</b> ${escapeHtml(e.message)}`;
+    clearInterval(poll);
+    $("go").disabled = false;
+    return;
+  }
   if (!s) return;
 
   if (s.pairingCode && $("codeBox").style.display === "none") {
@@ -131,8 +174,8 @@ async function checkStatus(jobId) {
     $("go").disabled = false;
     $("out").className = "out ok";
     $("out").innerHTML =
-      `<b>✅ Session ID ready for +${s.number}</b><br><br>` +
-      `<code>${s.sessionId}</code><br><br>` +
+      `<b>✅ Session ID ready for +${escapeHtml(s.number)}</b><br><br>` +
+      `<code>${escapeHtml(s.sessionId)}</code><br><br>` +
       `Copy this into <b>config.js</b> → <code>sessionId</code>`;
   }
 
@@ -140,8 +183,17 @@ async function checkStatus(jobId) {
     clearInterval(poll);
     $("go").disabled = false;
     $("out").className = "out err";
-    $("out").textContent = "❌ " + (s.error || "Unknown error.");
+    $("out").innerHTML =
+      `<b>❌ Generation failed.</b><br><br>` +
+      `<b>Error:</b> ${escapeHtml(s.error || "Unknown error.")}`;
   }
+}
+
+/* ─── Escape helper ─── */
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
 }
 </script>
 </body>
